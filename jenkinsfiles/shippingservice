@@ -10,10 +10,10 @@ pipeline {
         AWS_REGION   = "us-east-1"
         IMAGE_NAME   = "shippingservice"
         ECR_ACCOUNT  = "163447728448"
-        ECR_REPO     = "adservice"
+        ECR_REPO     = "shippingservice"
         ECR_URL      = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         REPO_URL     = "${ECR_URL}/${ECR_REPO}"
-        YAML_FILE    = "adservice.yaml"
+        YAML_FILE    = "shippingservice.yaml"
 
         GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
         GIT_USER_NAME = "JFKTBonny"
@@ -36,7 +36,7 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                dir('src/adservice') {
+                dir('src/shippingservice') {
                     sh '''
                       set -e
                       TAG=${IMAGE_TAG:-$BUILD_NUMBER}
