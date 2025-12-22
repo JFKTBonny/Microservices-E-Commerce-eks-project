@@ -1,69 +1,106 @@
 pipeline {
-    agent any 
+    agent any
+
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Docker image tag (default = BUILD_NUMBER)')
+        choice(name: 'ENV', choices: ['dev', 'qa', 'prod'], description: 'Deployment environment')
+    }
 
     environment {
+        AWS_REGION   = "us-east-1"
+        IMAGE_NAME   = "adservice"
+        ECR_ACCOUNT  = "163447728448"
+        ECR_REPO     = "adservice"
+        ECR_URL      = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        REPO_URL     = "${ECR_URL}/${ECR_REPO}"
+        YAML_FILE    = "adservice.yaml"
+
         GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
-        GIT_EMAIL = "Yaswanth.arumulla@gmail.com"
-        GIT_USER_NAME = "arumullayaswanth"
-        IMAGE_NAME = "adservice"
-        REPO_URL = "242201296943.dkr.ecr.us-east-1.amazonaws.com/adservice"
-        YAML_FILE = "adservice.yaml"
+        GIT_USER_NAME = "JFKTBonny"
+        GIT_EMAIL     = "jkamkotoyip@yahoo.com"
     }
 
     stages {
-        stage('Cleaning Workspace') {
+
+        stage('Clean Workspace') {
             steps {
                 cleanWs()
             }
         }
 
-        stage('Checkout from Git') {
+        stage('Checkout Source') {
             steps {
-                git branch: 'master', url: 'https://github.com/arumullayaswanth/Microservices-E-Commerce-eks-project.git'
+                checkout scm
             }
         }
 
-        stage("Docker Image Build") {
+        stage('Build Docker Image') {
             steps {
-                script {
-                    dir('src/adservice') {
-                        sh 'docker system prune -f'
-                        sh 'docker container prune -f'
-                        sh 'docker build -t adservice .'
-                    }
-                }
-            }
-        }
-
-        stage("ECR Image Pushing") {
-            steps {
-                script {
+                dir('src/adservice') {
                     sh '''
-                    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 242201296943.dkr.ecr.us-east-1.amazonaws.com
-                    docker tag adservice:latest 242201296943.dkr.ecr.us-east-1.amazonaws.com/adservice:${BUILD_NUMBER}
-                    docker push 242201296943.dkr.ecr.us-east-1.amazonaws.com/adservice:${BUILD_NUMBER}
+                      set -e
+                      TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                      docker build -t ${IMAGE_NAME}:${TAG} .
                     '''
                 }
             }
         }
 
-        stage('Update Deployment file') {
+        stage('Push Image to ECR') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-credentials-']
+                ]) {
+                    sh '''
+                      set -e
+                      TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+
+                      aws ecr get-login-password --region ${AWS_REGION} \
+                      | docker login --username AWS --password-stdin ${ECR_URL}
+
+                      docker tag ${IMAGE_NAME}:${TAG} ${REPO_URL}:${TAG}
+                      docker push ${REPO_URL}:${TAG}
+                    '''
+                }
+            }
+        }
+
+        stage('Update Kubernetes Manifest') {
             steps {
                 dir('kubernetes-files') {
-                    withCredentials([string(credentialsId: 'my-git-pattoken', variable: 'git_token')]) {
+                    withCredentials([
+                        string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')
+                    ]) {
                         sh '''
-                            git config user.email "${GIT_EMAIL}"
-                            git config user.name "${GIT_USER_NAME}"
-                            echo $BUILD_NUMBER
+                          set -e
+                          TAG=${IMAGE_TAG:-$BUILD_NUMBER}
 
-                            sed -i "s#image:.*#image: ${REPO_URL}:$BUILD_NUMBER#g" ${YAML_FILE}
-                            git add .
-                            git commit -m "Update ${IMAGE_NAME} Image to version ${BUILD_NUMBER}"
-                            git push https://${git_token}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:master
+                          git config user.email "${GIT_EMAIL}"
+                          git config user.name "${GIT_USER_NAME}"
+
+                          sed -i "s#image:.*#image: ${REPO_URL}:${TAG}#g" ${YAML_FILE}
+
+                          git add ${YAML_FILE}
+                          git commit -m "chore(${ENV}): update ${IMAGE_NAME} image to ${TAG}" || echo "No changes to commit"
+
+                          git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master
                         '''
                     }
                 }
             }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline completed successfully"
+        }
+        failure {
+            echo "❌ Pipeline failed"
+        }
+        cleanup {
+            sh 'docker image prune -f || true'
         }
     }
 }
