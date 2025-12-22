@@ -42,7 +42,7 @@ pipeline {
                 axes {
                     axis {
                         name 'SERVICE'
-                        values 'adservice', 'cartservice', 'paymentservice'
+                        values 'adservice', 'cartservice/src', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
                     }
                 }
 
