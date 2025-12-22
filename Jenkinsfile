@@ -71,7 +71,7 @@ pipeline {
                         steps {
                             withCredentials([
                                 [$class: 'AmazonWebServicesCredentialsBinding',
-                                 credentialsId: 'aws-jenkins']
+                                 credentialsId: 'aws-credentials']
                             ]) {
                                 sh '''
                                   set -e
