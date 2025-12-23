@@ -3,119 +3,155 @@ pipeline {
 
     parameters {
         choice(
-            name: 'SERVICES',
+            name: 'SERVICE',
             choices: [
-                'all', 
-                'adservice', 
-                'cartservice', 
-                'paymentservice', 
-                'checkoutservice', 
-                'currencyservice', 
-                'emailservice', 
-                'frontend', 
-                'loadgenerator', 
-                'productcatalogservice', 
-                'recommendationservice', 
+                'all',
+                'adservice',
+                'cartservice',
+                'paymentservice',
+                'checkoutservice',
+                'currencyservice',
+                'emailservice',
+                'frontend',
+                'loadgenerator',
+                'productcatalogservice',
+                'recommendationservice',
                 'shippingservice'
             ],
-            description: 'Which services to build'
+            description: 'Service to build'
         )
+
         choice(
             name: 'ENV',
             choices: ['dev', 'qa', 'prod'],
             description: 'Target environment'
         )
+
         string(
             name: 'IMAGE_TAG',
-            defaultValue: "${BUILD_NUMBER}",
-            description: 'Optional image tag (defaults to the build number)'
+            defaultValue: '',
+            description: 'Optional image tag (defaults to build number)'
         )
     }
 
     environment {
-        AWS_REGION  = "us-east-1"
-        ECR_ACCOUNT = "163447728448"
+        AWS_REGION  = 'us-east-1'
+        ECR_ACCOUNT = '163447728448'
         ECR_URL     = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        GIT_USER_NAME = "JFKTBonny"
-        GIT_EMAIL     = "jkamkotoyip@yahoo.com"
-        GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
+
+        GIT_USER_NAME = 'JFKTBonny'
+        GIT_EMAIL     = 'jkamkotoyip@yahoo.com'
+        GIT_REPO_NAME = 'Microservices-E-Commerce-eks-project'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Build & Push Microservices') {
-            when {
-                expression { params.SERVICES != '' }
-            }
-            steps {
-                script {
-                    def servicesToBuild = params.SERVICES == 'all' ? 
-                        ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'] : 
-                        [params.SERVICES]
+        stage('Build & Push') {
+            matrix {
+                axes {
+                    axis {
+                        name 'SERVICE_NAME'
+                        values(
+                            'adservice',
+                            'cartservice',
+                            'paymentservice',
+                            'checkoutservice',
+                            'currencyservice',
+                            'emailservice',
+                            'frontend',
+                            'loadgenerator',
+                            'productcatalogservice',
+                            'recommendationservice',
+                            'shippingservice'
+                        )
+                    }
+                }
 
-                    def parallelSteps = [:]
-                    servicesToBuild.each { service ->
-                        parallelSteps["${service}"] = {
-                            buildService(service)
+                when {
+                    expression {
+                        params.SERVICE == 'all' || params.SERVICE == SERVICE_NAME
+                    }
+                }
+
+                stages {
+
+                    stage('Build & Push Image') {
+                        steps {
+                            script {
+                                def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
+
+                                def serviceDirMap = [
+                                    adservice               : 'src/adservice',
+                                    cartservice             : 'cartservice/src',
+                                    paymentservice          : 'src/paymentservice',
+                                    checkoutservice         : 'src/checkoutservice',
+                                    currencyservice         : 'src/currencyservice',
+                                    emailservice            : 'src/emailservice',
+                                    frontend                : 'src/frontend',
+                                    loadgenerator           : 'src/loadgenerator',
+                                    productcatalogservice   : 'src/productcatalogservice',
+                                    recommendationservice   : 'src/recommendationservice',
+                                    shippingservice         : 'src/shippingservice'
+                                ]
+
+                                def serviceDir = serviceDirMap[SERVICE_NAME]
+
+                                if (!fileExists("${serviceDir}/Dockerfile")) {
+                                    echo "⚠️ No Dockerfile for ${SERVICE_NAME}, skipping"
+                                    return
+                                }
+
+                                dir(serviceDir) {
+                                    sh "docker build -t ${SERVICE_NAME}:${tag} ."
+
+                                    withCredentials([[
+                                        $class: 'AmazonWebServicesCredentialsBinding',
+                                        credentialsId: 'aws-credentials'
+                                    ]]) {
+                                        sh """
+                                            aws ecr get-login-password --region ${AWS_REGION} \
+                                            | docker login --username AWS --password-stdin ${ECR_URL}
+
+                                            docker tag ${SERVICE_NAME}:${tag} ${ECR_URL}/${SERVICE_NAME}:${tag}
+                                            docker push ${ECR_URL}/${SERVICE_NAME}:${tag}
+                                        """
+                                    }
+                                }
+                            }
                         }
                     }
-                    parallel(parallelSteps)
-                }
-            }
-        }
 
-        stage('Update Kubernetes Manifests') {
-            when {
-                expression { params.SERVICES != 'loadgenerator' }
-            }
-            steps {
-                dir('kubernetes-files') {
-                    script {
-                        def tag = params.IMAGE_TAG ?: "${BUILD_NUMBER}"
-                        withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
-                            sh """
-                                # Clean workspace and ignore temp files
-                                git clean -fd || true
-                                rm -rf .git/@tmp || true
-                                
-                                # Force sync with remote master
-                                git fetch origin
-                                git checkout origin/master -f
-                                git reset --hard origin/master
-                                
-                                git config user.email "${GIT_EMAIL}"
-                                git config user.name "${GIT_USER_NAME}"
+                    stage('Update Manifest') {
+                        when {
+                            expression { SERVICE_NAME != 'loadgenerator' }
+                        }
+                        steps {
+                            script {
+                                def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
 
-                                services="adservice cartservice paymentservice checkoutservice currencyservice emailservice frontend productcatalogservice recommendationservice shippingservice"
+                                dir('kubernetes-files') {
+                                    withCredentials([
+                                        string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')
+                                    ]) {
+                                        sh """
+                                            git config user.email "${GIT_EMAIL}"
+                                            git config user.name "${GIT_USER_NAME}"
 
-                                changes_made=false
-                                for service in \$services; do
-                                    yaml_file="\${service}.yaml"
-                                    if [ -f "\$yaml_file" ]; then
-                                        sed -i "s#image:.*#image: ${ECR_URL}/\$service:${tag}#g" "\$yaml_file"
-                                        if [ \$? -eq 0 ]; then
-                                            git add "\$yaml_file"
-                                            changes_made=true
-                                            echo "✅ Updated image tag in \$yaml_file"
-                                        fi
-                                    else
-                                        echo "⚠️  \$yaml_file not found, skipping"
-                                    fi
-                                done
+                                            sed -i "s#image:.*#image: ${ECR_URL}/${SERVICE_NAME}:${tag}#g" ${SERVICE_NAME}.yaml
 
-                                if [ "\$changes_made" = true ]; then
-                                    git commit -m "chore(\${ENV}): update service images to ${tag}" || { echo "Commit failed"; exit 1; }
-                                    git push https://\${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master || { echo "Push failed"; exit 1; }
-                                    echo "✅ Successfully updated and pushed manifests"
-                                else
-                                    echo "ℹ️  No changes to commit"
-                                fi
-                            """
+                                            git add ${SERVICE_NAME}.yaml
+                                            git commit -m "chore(${ENV}): update ${SERVICE_NAME} to ${tag}" || echo "No changes"
+                                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master
+                                        """
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -128,61 +164,10 @@ pipeline {
             sh 'docker image prune -f || true'
         }
         success {
-            echo "✅ Pipeline completed successfully"
+            echo '✅ Pipeline completed successfully'
         }
         failure {
-            echo "❌ Pipeline failed"
-            sh 'ls -la kubernetes-files/ || true'
+            echo '❌ Pipeline failed'
         }
     }
-}
-
-def buildService(service) {
-    def serviceDirs = [
-        'adservice': 'src/adservice',
-        'cartservice': 'cartservice',
-        'checkoutservice': 'src/checkoutservice',
-        'currencyservice': 'src/currencyservice',
-        'emailservice': 'src/emailservice',
-        'frontend': 'src/frontend',
-        'loadgenerator': 'src/loadgenerator',
-        'paymentservice': 'src/paymentservice',
-        'productcatalogservice': 'src/productcatalogservice',
-        'recommendationservice': 'src/recommendationservice',
-        'shippingservice': 'src/shippingservice'
-    ]
-    
-    def serviceDir = serviceDirs[service] ?: "src/${service}"
-    
-    if (!fileExists(serviceDir)) {
-        echo "⚠️  Directory ${serviceDir} not found, skipping ${service}"
-        return
-    }
-    
-    dir(serviceDir) {
-        echo "📁 Building ${service} from ${pwd()}"
-        sh 'ls -la'
-        
-        if (hasDockerfile()) {
-            def tag = params.IMAGE_TAG ?: "${BUILD_NUMBER}"
-            sh """
-                docker build -t ${service}:${tag} .
-            """
-            
-            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
-                sh """
-                    aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_URL}
-                    docker tag ${service}:${tag} ${env.ECR_URL}/${service}:${tag}
-                    docker push ${env.ECR_URL}/${service}:${tag}
-                """
-            }
-            echo "✅ ${service}:${tag} built and pushed successfully"
-        } else {
-            echo "⚠️  No Dockerfile found for ${service}, skipping build"
-        }
-    }
-}
-
-def hasDockerfile() {
-    return fileExists('Dockerfile') || fileExists('dockerfile')
 }
