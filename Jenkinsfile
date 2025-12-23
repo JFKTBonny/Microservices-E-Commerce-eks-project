@@ -218,6 +218,8 @@ def processService(service, tag, serviceConfig) {
         stage("${service} - Push") {
             withCredentials([usernamePassword(
                 credentialsId: 'dockerhub-credentials',
+                
+                
                 usernameVariable: 'DOCKER_USER',
                 passwordVariable: 'DOCKER_PASS'
             )]) {
