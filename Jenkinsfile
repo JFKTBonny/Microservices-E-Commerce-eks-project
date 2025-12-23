@@ -3,7 +3,7 @@ pipeline {
 
     parameters {
         choice(
-            name: 'SERVICE',
+            name: 'SERVICES',
             choices: [
                 'all',
                 'adservice',
@@ -18,7 +18,7 @@ pipeline {
                 'recommendationservice',
                 'shippingservice'
             ],
-            description: 'Service to build'
+            description: 'Which services to build'
         )
 
         choice(
@@ -30,18 +30,18 @@ pipeline {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
-            description: 'Optional image tag (defaults to build number)'
+            description: 'Optional image tag (defaults to BUILD_NUMBER)'
         )
     }
 
     environment {
-        AWS_REGION  = 'us-east-1'
-        ECR_ACCOUNT = '163447728448'
+        AWS_REGION   = "us-east-1"
+        ECR_ACCOUNT = "163447728448"
         ECR_URL     = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-        GIT_USER_NAME = 'JFKTBonny'
-        GIT_EMAIL     = 'jkamkotoyip@yahoo.com'
-        GIT_REPO_NAME = 'Microservices-E-Commerce-eks-project'
+        GIT_USER_NAME = "JFKTBonny"
+        GIT_EMAIL     = "jkamkotoyip@yahoo.com"
+        GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
     }
 
     stages {
@@ -52,108 +52,99 @@ pipeline {
             }
         }
 
-        stage('Build & Push') {
-            matrix {
-                axes {
-                    axis {
-                        name 'SERVICE_NAME'
-                        values(
-                            'adservice',
-                            'cartservice',
-                            'paymentservice',
-                            'checkoutservice',
-                            'currencyservice',
-                            'emailservice',
-                            'frontend',
-                            'loadgenerator',
-                            'productcatalogservice',
-                            'recommendationservice',
-                            'shippingservice'
-                        )
+        stage('Build & Push Services') {
+            steps {
+                script {
+
+                    def TAG = params.IMAGE_TAG?.trim()
+                    if (!TAG) {
+                        TAG = env.BUILD_NUMBER
                     }
-                }
 
-                when {
-                    expression {
-                        params.SERVICE == 'all' || params.SERVICE == SERVICE_NAME
-                    }
-                }
+                    /*
+                      service : [
+                        dockerfile path,
+                        build context,
+                        ecr repo name
+                      ]
+                    */
+                    def services = [
+                        adservice: [
+                            dockerfile: 'src/adservice/Dockerfile',
+                            context   : 'src/adservice',
+                            repo      : 'adservice'
+                        ],
+                        cartservice: [
+                            dockerfile: 'cartservice/src/Dockerfile',
+                            context   : 'cartservice/src',
+                            repo      : 'cartservice'
+                        ],
+                        paymentservice: [
+                            dockerfile: 'src/paymentservice/Dockerfile',
+                            context   : 'src/paymentservice',
+                            repo      : 'paymentservice'
+                        ],
+                        checkoutservice: [
+                            dockerfile: 'src/checkoutservice/Dockerfile',
+                            context   : 'src/checkoutservice',
+                            repo      : 'checkoutservice'
+                        ],
+                        currencyservice: [
+                            dockerfile: 'src/currencyservice/Dockerfile',
+                            context   : 'src/currencyservice',
+                            repo      : 'currencyservice'
+                        ],
+                        emailservice: [
+                            dockerfile: 'src/emailservice/Dockerfile',
+                            context   : 'src/emailservice',
+                            repo      : 'emailservice'
+                        ],
+                        frontend: [
+                            dockerfile: 'src/frontend/Dockerfile',
+                            context   : 'src/frontend',
+                            repo      : 'frontend'
+                        ],
+                        loadgenerator: [
+                            dockerfile: 'src/loadgenerator/Dockerfile',
+                            context   : 'src/loadgenerator',
+                            repo      : 'loadgenerator'
+                        ],
+                        productcatalogservice: [
+                            dockerfile: 'src/productcatalogservice/Dockerfile',
+                            context   : 'src/productcatalogservice',
+                            repo      : 'productcatalogservice'
+                        ],
+                        recommendationservice: [
+                            dockerfile: 'src/recommendationservice/Dockerfile',
+                            context   : 'src/recommendationservice',
+                            repo      : 'recommendationservice'
+                        ],
+                        shippingservice: [
+                            dockerfile: 'src/shippingservice/Dockerfile',
+                            context   : 'src/shippingservice',
+                            repo      : 'shippingservice'
+                        ]
+                    ]
 
-                stages {
+                    def selected = (params.SERVICES == 'all') ?
+                        services.keySet() :
+                        [params.SERVICES]
 
-                    stage('Build & Push Image') {
-                        steps {
-                            script {
-                                def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
+                    def jobs = [:]
 
-                                def serviceDirMap = [
-                                    adservice               : 'src/adservice',
-                                    cartservice             : 'cartservice/src',
-                                    paymentservice          : 'src/paymentservice',
-                                    checkoutservice         : 'src/checkoutservice',
-                                    currencyservice         : 'src/currencyservice',
-                                    emailservice            : 'src/emailservice',
-                                    frontend                : 'src/frontend',
-                                    loadgenerator           : 'src/loadgenerator',
-                                    productcatalogservice   : 'src/productcatalogservice',
-                                    recommendationservice   : 'src/recommendationservice',
-                                    shippingservice         : 'src/shippingservice'
-                                ]
-
-                                def serviceDir = serviceDirMap[SERVICE_NAME]
-
-                                if (!fileExists("${serviceDir}/Dockerfile")) {
-                                    echo "⚠️ No Dockerfile for ${SERVICE_NAME}, skipping"
-                                    return
-                                }
-
-                                dir(serviceDir) {
-                                    sh "docker build -t ${SERVICE_NAME}:${tag} ."
-
-                                    withCredentials([[
-                                        $class: 'AmazonWebServicesCredentialsBinding',
-                                        credentialsId: 'aws-credentials'
-                                    ]]) {
-                                        sh """
-                                            aws ecr get-login-password --region ${AWS_REGION} \
-                                            | docker login --username AWS --password-stdin ${ECR_URL}
-
-                                            docker tag ${SERVICE_NAME}:${tag} ${ECR_URL}/${SERVICE_NAME}:${tag}
-                                            docker push ${ECR_URL}/${SERVICE_NAME}:${tag}
-                                        """
-                                    }
-                                }
-                            }
+                    selected.each { svc ->
+                        jobs[svc] = {
+                            buildAndPush(
+                                svc,
+                                services[svc].dockerfile,
+                                services[svc].context,
+                                services[svc].repo,
+                                TAG
+                            )
                         }
                     }
 
-                    stage('Update Manifest') {
-                        when {
-                            expression { SERVICE_NAME != 'loadgenerator' }
-                        }
-                        steps {
-                            script {
-                                def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
-
-                                dir('kubernetes-files') {
-                                    withCredentials([
-                                        string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')
-                                    ]) {
-                                        sh """
-                                            git config user.email "${GIT_EMAIL}"
-                                            git config user.name "${GIT_USER_NAME}"
-
-                                            sed -i "s#image:.*#image: ${ECR_URL}/${SERVICE_NAME}:${tag}#g" ${SERVICE_NAME}.yaml
-
-                                            git add ${SERVICE_NAME}.yaml
-                                            git commit -m "chore(${ENV}): update ${SERVICE_NAME} to ${tag}" || echo "No changes"
-                                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master
-                                        """
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    parallel jobs
                 }
             }
         }
@@ -163,11 +154,44 @@ pipeline {
         always {
             sh 'docker image prune -f || true'
         }
-        success {
-            echo '✅ Pipeline completed successfully'
-        }
-        failure {
-            echo '❌ Pipeline failed'
-        }
     }
+}
+
+/* =============================
+   Helper Function
+   ============================= */
+
+def buildAndPush(service, dockerfile, context, repo, tag) {
+
+    if (!fileExists(dockerfile)) {
+        echo "⚠️ Dockerfile not found for ${service}, skipping"
+        return
+    }
+
+    echo "🚀 Building ${service}:${tag}"
+
+    sh """
+        docker build \
+          -f ${dockerfile} \
+          -t ${repo}:${tag} \
+          --build-arg ENV=${params.ENV} \
+          --label service=${service} \
+          --label build=${tag} \
+          ${context}
+    """
+
+    withCredentials([
+        [$class: 'AmazonWebServicesCredentialsBinding',
+         credentialsId: 'aws-credentials']
+    ]) {
+        sh """
+            aws ecr get-login-password --region ${env.AWS_REGION} \
+            | docker login --username AWS --password-stdin ${env.ECR_URL}
+
+            docker tag ${repo}:${tag} ${env.ECR_URL}/${repo}:${tag}
+            docker push ${env.ECR_URL}/${repo}:${tag}
+        """
+    }
+
+    echo "✅ ${service} pushed to ECR"
 }
