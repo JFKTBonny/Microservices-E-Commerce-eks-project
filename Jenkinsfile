@@ -56,7 +56,7 @@ pipeline {
                         steps {
                             dir("${SERVICE}") {
                                 script {
-                                    def buildDir = (SERVICE == 'cartservice') ? 'src' : 'src/cartservice/src'
+                                    def buildDir = (SERVICE == 'cartservice') ? 'src/cartservice/src' : '.'
                                     sh """
                                         docker build -t ${ECR_URL}/${SERVICE}:${TAG} ${buildDir}
                                     """
