@@ -37,15 +37,37 @@ pipeline {
             }
         }
 
+        stage('Validate Services') {
+            steps {
+                script {
+                    // List services with Dockerfiles
+                    def servicesWithDockerfile = []
+                    def serviceDirs = ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice']
+                    
+                    serviceDirs.each { service ->
+                        if (fileExists("${service}/Dockerfile")) {
+                            servicesWithDockerfile.add(service)
+                            echo "✅ Found Dockerfile in ${service}/"
+                        } else {
+                            echo "❌ No Dockerfile in ${service}/"
+                        }
+                    }
+                    
+                    env.SERVICES_WITH_DOCKERFILE = servicesWithDockerfile.join(',')
+                    echo "Services ready to build: ${env.SERVICES_WITH_DOCKERFILE}"
+                }
+            }
+        }
+
         stage('Build & Push Microservices') {
+            when {
+                expression { params.SERVICES == 'all' || params.SERVICES in env.SERVICES_WITH_DOCKERFILE.split(',') }
+            }
             matrix {
                 axes {
                     axis {
                         name 'SERVICE'
-                        values 'adservice', 'cartservice', 'paymentservice', 
-                               'checkoutservice', 'currencyservice', 'emailservice', 
-                               'frontend', 'loadgenerator', 'productcatalogservice', 
-                               'recommendationservice', 'shippingservice'
+                        values "${env.SERVICES_WITH_DOCKERFILE}"
                     }
                 }
                 stages {
@@ -54,16 +76,25 @@ pipeline {
                             expression { params.SERVICES == 'all' || params.SERVICES == env.SERVICE }
                         }
                         steps {
-                            dir("${SERVICE}") {
-                                script {
-                                    def buildDir = (SERVICE == 'cartservice') ? 'src' : '.'
+                            script {
+                                dir("${SERVICE}") {
+                                    // Check cartservice special case
+                                    def buildContext = '.'
+                                    if (SERVICE == 'cartservice' && fileExists('src/Dockerfile')) {
+                                        buildContext = 'src'
+                                    } else if (!fileExists('Dockerfile')) {
+                                        error "No Dockerfile found in ${SERVICE}/${buildContext}"
+                                    }
+                                    
+                                    echo "Building ${SERVICE} from ${buildContext}"
                                     sh """
-                                        docker build -t ${ECR_URL}/${SERVICE}:${TAG} ${buildDir}
+                                        docker build -t ${ECR_URL}/${SERVICE}:${TAG} ${buildContext}
                                     """
                                 }
                             }
                         }
                     }
+                    
                     stage('Push to ECR') {
                         when {
                             expression { params.SERVICES == 'all' || params.SERVICES == env.SERVICE }
@@ -73,7 +104,6 @@ pipeline {
                                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
                                     sh """
                                         aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
-                                        docker tag ${ECR_URL}/${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
                                         docker push ${ECR_URL}/${SERVICE}:${TAG}
                                     """
                                 }
@@ -127,7 +157,7 @@ pipeline {
             echo "✅ Pipeline completed successfully for ${params.SERVICES} in ${params.ENV}"
         }
         failure {
-            echo "❌ Pipeline failed"
+            echo "❌ Pipeline failed - check which services have Dockerfiles"
         }
     }
 }
