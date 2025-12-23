@@ -57,12 +57,10 @@ pipeline {
                     stage('Build Image') {
                         steps {
                             script {
-                                def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
-
                                 def dockerfilePath = SERVICE == 'cartservice' ? 'src/cartservice/src/Dockerfile' : "src/${SERVICE}/Dockerfile"
                                 if (fileExists(dockerfilePath)) {
                                     sh """
-                                        
+                                        TAG=${IMAGE_TAG:-$BUILD_NUMBER}
                                         docker build -f ${dockerfilePath} -t ${SERVICE}:${TAG} .
                                     """
                                 } else {
@@ -75,13 +73,11 @@ pipeline {
                     stage('Push to ECR') {
                         steps {
                             script {
-                                def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
-
                                 def dockerfilePath = SERVICE == 'cartservice' ? 'cartservice/src/Dockerfile' : "src/${SERVICE}/Dockerfile"
                                 if (fileExists(dockerfilePath)) {
                                     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
                                         sh """
-                                            
+                                            TAG=${IMAGE_TAG:-$BUILD_NUMBER}
                                             aws ecr get-login-password --region ${AWS_REGION} \
                                             | docker login --username AWS --password-stdin ${ECR_URL}
 
