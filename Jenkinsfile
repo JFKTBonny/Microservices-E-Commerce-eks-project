@@ -2,32 +2,19 @@ pipeline {
     agent any
 
     parameters {
-        choice(
-            name: 'SERVICES',
-            choices: ['all', 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'],
-            description: 'Which services to build'
-        )
-        choice(
-            name: 'ENV',
-            choices: ['dev', 'qa', 'prod'],
-            description: 'Target environment'
-        )
-        string(
-            name: 'IMAGE_TAG',
-            defaultValue: '',
-            description: 'Optional image tag (defaults to BUILD_NUMBER)'
-        )
+        choice(name: 'SERVICES', choices: [...], description: 'Which services to build')
+        choice(name: 'ENV', choices: ['dev', 'qa', 'prod'], description: 'Target environment')
+        string(name: 'IMAGE_TAG', defaultValue: "$BUILD_NUMBER", description: 'Optional image tag (defaults to the build number)')
+        choice(name: 'MAX_PARALLEL', choices: ['1', '2', '3', '4'], description: 'Maximum number of parallel builds')
     }
 
     environment {
-        AWS_REGION  = 'us-east-1'
-        ECR_ACCOUNT = '163447728448'
+        AWS_REGION  = "us-east-1"
+        ECR_ACCOUNT = "163447728448"
         ECR_URL     = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        TAG         = "${params.IMAGE_TAG ?: env.BUILD_NUMBER}"
-        
-        GIT_USER_NAME = 'JFKTBonny'
-        GIT_EMAIL     = 'jkamkotoyip@yahoo.com'
-        GIT_REPO_NAME = 'Microservices-E-Commerce-eks-project'
+        GIT_USER_NAME = "JFKTBonny"
+        GIT_EMAIL     = "jkamkotoyip@yahoo.com"
+        GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
     }
 
     stages {
@@ -37,102 +24,70 @@ pipeline {
             }
         }
 
-        stage('Validate Dockerfiles') {
-            steps {
-                script {
-                    def services = ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice']
-                    
-                    def servicesToCheck = params.SERVICES == 'all' ? services : [params.SERVICES]
-                    def validServices = []
-                    
-                    // Parallel file existence checks
-                    def checkTasks = servicesToCheck.collectEntries { service -> 
-                        ["check-${service}": {
-                            if (fileExists("${service}/Dockerfile")) {
-                                validServices << service
-                                echo "✅ ${service}: Dockerfile found"
-                            } else if (service == 'cartservice' && fileExists("cartservice/src/Dockerfile")) {
-                                validServices << service
-                                echo "✅ ${service}: src/Dockerfile found"
-                            } else {
-                                echo "❌ ${service}: No Dockerfile found"
-                            }
-                        }]
-                    }
-                    
-                    parallel checkTasks
-                    
-                    if (validServices.isEmpty()) {
-                        error "No services with Dockerfiles found to build!"
-                    }
-                    
-                    echo "🚀 Building: ${validServices.join(', ')}"
-                    env.VALID_SERVICES = validServices.join(',')
-                }
-            }
-        }
-
         stage('Build & Push Microservices') {
-            steps {
-                script {
-                    // Single ECR login
-                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
-                        sh """
-                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
-                        """
-                    }
-                    
-                    // Parallel builds for valid services only
-                    def services = env.VALID_SERVICES.split(',')
-                    def buildTasks = services.collectEntries { service -> 
-                        ["${service}": {
-                            dir(service) {
-                                stage("${service}: Build & Push") {
-                                    def buildContext = fileExists('src/Dockerfile') ? 'src' : '.'
+            matrix {
+                axes { axis { name 'SERVICE'; values 'adservice', 'cartservice', ... } }
+                failFast false
+                maxParallel params.MAX_PARALLEL.toInteger()
+                when {
+                    expression { params.SERVICES == 'all' || params.SERVICES == env.SERVICE }
+                }
+
+                stages {
+                    stage('Build Image') {
+                        steps {
+                            script {
+                                if (checkDockerfileExists(env.SERVICE)) {
+                                    def dockerfilePath = getDockerfilePath(env.SERVICE)
                                     sh """
-                                        docker build -t ${ECR_URL}/${service}:${TAG} ${buildContext}
-                                        docker push ${ECR_URL}/${service}:${TAG}
+                                        TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                                        echo "Building ${SERVICE} with tag ${TAG}"
+                                        docker build -f ${dockerfilePath} -t ${SERVICE}:${TAG} .
                                     """
-                                    echo "✅ ${service} pushed to ECR: ${ECR_URL}/${service}:${TAG}"
                                 }
                             }
-                        }]
+                        }
                     }
-                    
-                    parallel buildTasks
+
+                    stage('Push to ECR') {
+                        steps {
+                            script {
+                                if (checkDockerfileExists(env.SERVICE)) {
+                                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                                        sh """
+                                            TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                                            echo "Logging in to ECR and pushing ${SERVICE}:${TAG}"
+                                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
+                                            docker tag ${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
+                                            docker push ${ECR_URL}/${SERVICE}:${TAG}
+                                        """
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         stage('Update Kubernetes Manifests') {
-            when {
-                expression { params.SERVICES != 'loadgenerator' }
-            }
             steps {
                 dir('kubernetes-files') {
                     withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
                         sh '''
-                            git checkout master || git checkout -b update-manifests-${BUILD_NUMBER}
+                            git checkout master
                             git config user.email "${GIT_EMAIL}"
                             git config user.name "${GIT_USER_NAME}"
-                            
-                            services="adservice cartservice paymentservice checkoutservice currencyservice emailservice frontend productcatalogservice recommendationservice shippingservice"
-                            
-                            for service in $services; do
+                            for service in adservice cartservice ...
+                            do
                                 yaml_file="${service}.yaml"
                                 if [ -f "$yaml_file" ]; then
-                                    sed -i "s|image:.*|image: ${ECR_URL}/${service}:${TAG}|g" "$yaml_file"
-                                    git add "$yaml_file" || true
+                                    sed -i "s#image:.*#image: ${ECR_URL}/${service}:${IMAGE_TAG:-$BUILD_NUMBER}#g" "$yaml_file"
+                                    git add "$yaml_file"
                                 fi
                             done
-                            
-                            if ! git diff --staged --quiet; then
-                                git commit -m "chore(${ENV}): update images to ${TAG} [skip ci]"
-                                git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master || true
-                                echo "✅ Manifests updated and pushed"
-                            else
-                                echo "ℹ️ No manifest changes needed"
-                            fi
+                            git commit -m "chore(${ENV}): update service images" || echo "No changes to commit"
+                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git master
                         '''
                     }
                 }
@@ -141,14 +96,11 @@ pipeline {
     }
 
     post {
-        always {
-            sh 'docker image prune -f || true'
-        }
         success {
-            echo "🎉 SUCCESS: ${params.SERVICES} built and deployed to ${params.ENV}"
+            echo "✅ Matrix pipeline completed successfully"
         }
-        failure {
-            echo "💥 FAILED: Check which services need Dockerfiles"
+        cleanup {
+            sh 'docker image prune -f || true'
         }
     }
 }
