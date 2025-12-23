@@ -42,14 +42,14 @@ pipeline {
                 axes {
                     axis {
                         name 'SERVICE'
-                        values 'adservice', 'cartservice/src', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
+                        values 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
                     }
                 }
-
+                failFast false
+                maxParallel 2  // limit parallel builds to reduce Docker timeout
                 when {
                     expression {
-                        params.SERVICES == 'all' ||
-                        params.SERVICES == env.SERVICE
+                        params.SERVICES == 'all' || params.SERVICES == env.SERVICE
                     }
                 }
 
@@ -57,59 +57,64 @@ pipeline {
 
                     stage('Build Image') {
                         steps {
-                            dir("src/${SERVICE}") {
-                                sh '''
-                                  set -e
-                                  TAG=${IMAGE_TAG:-$BUILD_NUMBER}
-                                  docker build -t ${SERVICE}:${TAG} .
-                                '''
+                            script {
+                                def dockerfilePath = SERVICE == 'cartservice' ? 'src/cartservice/src/Dockerfile' : "src/${SERVICE}/Dockerfile"
+                                if (fileExists(dockerfilePath)) {
+                                    sh """
+                                        TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                                        docker build -f ${dockerfilePath} -t ${SERVICE}:${TAG} .
+                                    """
+                                } else {
+                                    echo "⚠️ Dockerfile not found for ${SERVICE}, skipping build."
+                                }
                             }
                         }
                     }
 
                     stage('Push to ECR') {
                         steps {
-                            withCredentials([
-                                [$class: 'AmazonWebServicesCredentialsBinding',
-                                 credentialsId: 'aws-credentials']
-                            ]) {
-                                sh '''
-                                  set -e
-                                  TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                            script {
+                                def dockerfilePath = SERVICE == 'cartservice' ? 'cartservice/src/Dockerfile' : "src/${SERVICE}/Dockerfile"
+                                if (fileExists(dockerfilePath)) {
+                                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                                        sh """
+                                            TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                                            aws ecr get-login-password --region ${AWS_REGION} \
+                                            | docker login --username AWS --password-stdin ${ECR_URL}
 
-                                  aws ecr get-login-password --region ${AWS_REGION} \
-                                  | docker login --username AWS --password-stdin ${ECR_URL}
-
-                                  docker tag ${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
-                                  docker push ${ECR_URL}/${SERVICE}:${TAG}
-                                '''
-                            }
-                        }
-                    }
-
-                    stage('Update Kubernetes Manifest') {
-                        steps {
-                            dir('kubernetes-files') {
-                                withCredentials([
-                                    string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')
-                                ]) {
-                                    sh '''
-                                      set -e
-                                      TAG=${IMAGE_TAG:-$BUILD_NUMBER}
-
-                                      git config user.email "${GIT_EMAIL}"
-                                      git config user.name "${GIT_USER_NAME}"
-
-                                      sed -i "s#image:.*#image: ${ECR_URL}/${SERVICE}:${TAG}#g" ${SERVICE}.yaml
-
-                                      git add ${SERVICE}.yaml
-                                      git commit -m "chore(${ENV}): update ${SERVICE} image to ${TAG}" || echo "No changes"
-
-                                      git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master
-                                    '''
+                                            docker tag ${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
+                                            docker push ${ECR_URL}/${SERVICE}:${TAG}
+                                        """
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        stage('Update Kubernetes Manifests') {
+            steps {
+                dir('kubernetes-files') {
+                    withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+                        sh '''
+                            git checkout master
+                            git config user.email "${GIT_EMAIL}"
+                            git config user.name "${GIT_USER_NAME}"
+
+                            for service in adservice cartservice paymentservice checkoutservice currencyservice emailservice frontend loadgenerator productcatalogservice recommendationservice shippingservice
+                            do
+                                yaml_file="${service}.yaml"
+                                if [ -f "$yaml_file" ]; then
+                                    sed -i "s#image:.*#image: ${ECR_URL}/${service}:${IMAGE_TAG:-$BUILD_NUMBER}#g" "$yaml_file"
+                                    git add "$yaml_file"
+                                fi
+                            done
+
+                            git commit -m "chore(${ENV}): update service images" || echo "No changes to commit"
+                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git master
+                        '''
                     }
                 }
             }
