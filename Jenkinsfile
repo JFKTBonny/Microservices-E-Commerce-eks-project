@@ -63,9 +63,11 @@ pipeline {
                                'recommendationservice', 'shippingservice'
                     }
                 }
-                failFast false
-                maxParallel params.MAX_PARALLEL.toInteger()
-
+                options {
+                    failFast false
+                    maxParallel params.MAX_PARALLEL.toInteger()
+                }
+                
                 when {
                     expression {
                         params.SERVICES == 'all' || params.SERVICES == env.SERVICE
