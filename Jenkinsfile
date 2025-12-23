@@ -38,8 +38,7 @@ pipeline {
     }
 
     environment {
-        DOCKERHUB_ORG = "santonix"
-        DOCKERHUB_REPO = "${DOCKERHUB_ORG}/${env.JOB_NAME.toLowerCase()}"
+        DOCKERHUB_ORG = "jfktbonny"
     }
 
     stages {
@@ -53,13 +52,90 @@ pipeline {
         stage('Test → Build → Push') {
             steps {
                 script {
+                    // Define serviceConfig INSIDE script scope
+                    def serviceConfig = [
+                        // Java/Gradle
+                        adservice: [
+                            dir: 'src/adservice',
+                            test: './gradlew test --no-daemon',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        // .NET (special case)
+                        cartservice: [
+                            dir: 'cartservice',
+                            test: 'dotnet test',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        // Go services
+                        checkoutservice: [
+                            dir: 'src/checkoutservice',
+                            test: 'go test ./... -v',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        productcatalogservice: [
+                            dir: 'src/productcatalogservice',
+                            test: 'go test ./... -v',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        shippingservice: [
+                            dir: 'src/shippingservice',
+                            test: 'go test ./... -v',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        // Node.js
+                        currencyservice: [
+                            dir: 'src/currencyservice',
+                            test: 'npm ci && npm test',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        paymentservice: [
+                            dir: 'src/paymentservice',
+                            test: 'npm ci && npm test',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        // Python
+                        emailservice: [
+                            dir: 'src/emailservice',
+                            test: 'pip3 install -r requirements.txt && pytest',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        recommendationservice: [
+                            dir: 'src/recommendationservice',
+                            test: 'pip3 install -r requirements.txt && pytest',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        // Frontend & Loadgen
+                        frontend: [
+                            dir: 'src/frontend',
+                            test: 'npm ci && npm test || echo "Frontend tests optional"',
+                            dockerfile: 'Dockerfile'
+                        ],
+                        
+                        loadgenerator: [
+                            dir: 'src/loadgenerator',
+                            test: 'echo "✅ Skipping tests for loadgenerator"',
+                            dockerfile: 'Dockerfile'
+                        ]
+                    ]
+
                     def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
-                    def services = params.SERVICES == 'all' ? serviceConfig.keySet() as List : [params.SERVICES]
+                    def services = params.SERVICES == 'all' ? 
+                        serviceConfig.keySet() as List : 
+                        [params.SERVICES]
 
                     def parallelSteps = [:]
                     services.each { svc ->
                         parallelSteps[svc] = {
-                            processService(svc, tag)
+                            processService(svc, tag, serviceConfig)
                         }
                     }
 
@@ -75,10 +151,10 @@ pipeline {
             sh 'docker system prune -f || true'
         }
         success {
-            echo "✅ All services built and pushed successfully! 🎉"
             script {
                 def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
-                echo "🐳 Images available at: ${env.DOCKERHUB_ORG}/${env.JOB_NAME.toLowerCase()}:<tag>"
+                echo "✅ All services built and pushed successfully! 🎉"
+                echo "🐳 Images: ${env.DOCKERHUB_ORG}/<service>:${tag}"
             }
         }
         failure {
@@ -88,124 +164,54 @@ pipeline {
 }
 
 // ================================
-// SERVICE CONFIGURATION
+// SERVICE PROCESSING FUNCTION
 // ================================
-def serviceConfig = [
-    // Java/Gradle
-    adservice: [
-        dir: 'src/adservice',
-        test: './gradlew test',
-        buildCmd: './gradlew bootBuildImage'
-    ],
-
-    // .NET
-    cartservice: [
-        dir: 'cartservice',  // Special case directory
-        test: 'dotnet test',
-        buildCmd: 'dotnet publish -c Release -o out'
-    ],
-
-    // Go services
-    checkoutservice: [
-        dir: 'src/checkoutservice',
-        test: 'go test ./...',
-        buildCmd: 'go build -o server .'
-    ],
-
-    frontend: [
-        dir: 'src/frontend',
-        test: 'npm test || echo "Frontend tests skipped"',
-        buildCmd: 'npm run build'
-    ],
-
-    productcatalogservice: [
-        dir: 'src/productcatalogservice',
-        test: 'go test ./...',
-        buildCmd: 'go build -o server .'
-    ],
-
-    shippingservice: [
-        dir: 'src/shippingservice',
-        test: 'go test ./...',
-        buildCmd: 'go build -o server .'
-    ],
-
-    // Node.js
-    currencyservice: [
-        dir: 'src/currencyservice',
-        test: 'npm ci && npm test',
-        buildCmd: 'npm run build'
-    ],
-
-    paymentservice: [
-        dir: 'src/paymentservice',
-        test: 'npm ci && npm test',
-        buildCmd: 'npm run build'
-    ],
-
-    // Python
-    emailservice: [
-        dir: 'src/emailservice',
-        test: 'pip install -r requirements.txt && pytest',
-        buildCmd: 'pip install -r requirements.txt -r requirements-prod.txt'
-    ],
-
-    recommendationservice: [
-        dir: 'src/recommendationservice',
-        test: 'pip install -r requirements.txt && pytest',
-        buildCmd: 'pip install -r requirements.txt -r requirements-prod.txt'
-    ],
-
-    // Load generator (no tests)
-    loadgenerator: [
-        dir: 'src/loadgenerator',
-        test: 'echo "✅ Skipping tests for loadgenerator"',
-        buildCmd: 'echo "✅ Load generator ready"'
-    ]
-]
-
-// ================================
-// SERVICE PROCESSING
-// ================================
-def processService(service, tag) {
+def processService(service, tag, serviceConfig) {
     def cfg = serviceConfig[service]
     
     if (!cfg) {
-        echo "⚠️  No config for ${service}, skipping"
+        echo "⚠️ No config for ${service}, skipping"
         return
     }
 
     dir(cfg.dir) {
         stage("${service} - Setup") {
-            echo "🚀 Processing ${service} in ${pwd()} (${params.ENV})"
+            echo "🚀 Processing ${service} → ${cfg.dir}"
             sh 'ls -la || true'
         }
 
-        // Test phase (optional)
+        // Test phase (conditional)
         if (params.RUN_TESTS && params.ENV != 'prod') {
             stage("${service} - Test") {
                 echo "🧪 Running tests..."
                 try {
-                    sh cfg.test
-                    echo "✅ Tests passed"
+                    sh """
+                        echo "Testing ${service}..."
+                        ${cfg.test}
+                    """
+                    echo "✅ Tests PASSED"
                 } catch (Exception e) {
-                    echo "⚠️  Tests failed but continuing build (non-prod)"
+                    echo "⚠️ Tests failed/optional for ${service}, continuing..."
+                    // Don't fail the build for test failures
                 }
             }
         }
 
         // Build phase
         stage("${service} - Build") {
-            if (!fileExists('Dockerfile')) {
-                error "❌ Dockerfile missing in ${cfg.dir}"
+            if (!fileExists(cfg.dockerfile)) {
+                error "❌ ${cfg.dockerfile} missing in ${cfg.dir}"
             }
+            
             sh """
                 docker build \\
                     --build-arg BUILD_NUMBER=${tag} \\
                     --build-arg ENVIRONMENT=${params.ENV} \\
-                    -t ${service}:${tag} .
+                    --no-cache \\
+                    -t ${service}:${tag} \\
+                    -f ${cfg.dockerfile} .
             """
-            echo "✅ Docker image built: ${service}:${tag}"
+            echo "✅ Built: ${service}:${tag}"
         }
 
         // Push phase
@@ -223,7 +229,7 @@ def processService(service, tag) {
                     docker push ${env.DOCKERHUB_ORG}/${service}:latest
                 """
             }
-            echo "✅ ${service}:${tag} pushed to Docker Hub"
+            echo "✅ Pushed: ${env.DOCKERHUB_ORG}/${service}:${tag}"
         }
     }
 }
