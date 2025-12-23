@@ -30,11 +30,6 @@ pipeline {
             defaultValue: "${BUILD_NUMBER}",
             description: 'Optional image tag (defaults to the build number)'
         )
-        choice(
-            name: 'MAX_PARALLEL',
-            choices: ['1', '2', '3', '4'],
-            description: 'Maximum number of parallel builds'
-        )
     }
 
     environment {
@@ -50,7 +45,6 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
-                sh 'ls -la' // Debug: show repo structure
             }
         }
 
@@ -60,44 +54,14 @@ pipeline {
             }
             steps {
                 script {
-                    def servicesToBuild = []
-                    if (params.SERVICES == 'all') {
-                        servicesToBuild = ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice']
-                    } else {
-                        servicesToBuild = [params.SERVICES]
-                    }
+                    def servicesToBuild = params.SERVICES == 'all' ? 
+                        ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'] : 
+                        [params.SERVICES]
 
                     def parallelSteps = [:]
                     servicesToBuild.each { service ->
                         parallelSteps["${service}"] = {
-                            stage("Build ${service}") {
-                                if (shouldBuildService(service)) {
-                                    dir(getServiceDir(service)) {
-                                        sh "ls -la" // Debug: show service directory
-                                        if (hasValidDockerfile(service)) {
-                                            def tag = params.IMAGE_TAG ?: "${BUILD_NUMBER}"
-                                            sh """
-                                                echo "Building ${service} with tag ${tag}"
-                                                docker build -t ${service}:${tag} .
-                                            """
-                                            stage("Push ${service} to ECR") {
-                                                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
-                                                    sh """
-                                                        echo "Pushing ${service}:${tag} to ECR"
-                                                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
-                                                        docker tag ${service}:${tag} ${ECR_URL}/${service}:${tag}
-                                                        docker push ${ECR_URL}/${service}:${tag}
-                                                    """
-                                                }
-                                            }
-                                        } else {
-                                            echo "⚠️ No valid Dockerfile found for ${service}, skipping"
-                                        }
-                                    }
-                                } else {
-                                    echo "⚠️ Skipping ${service} - no source directory found"
-                                }
-                            }
+                            buildService(service)
                         }
                     }
                     parallel(parallelSteps)
@@ -115,7 +79,15 @@ pipeline {
                         def tag = params.IMAGE_TAG ?: "${BUILD_NUMBER}"
                         withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
                             sh """
-                                git checkout master || git checkout -b master
+                                # Clean workspace and ignore temp files
+                                git clean -fd || true
+                                rm -rf .git/@tmp || true
+                                
+                                # Force sync with remote master
+                                git fetch origin
+                                git checkout origin/master -f
+                                git reset --hard origin/master
+                                
                                 git config user.email "${GIT_EMAIL}"
                                 git config user.name "${GIT_USER_NAME}"
 
@@ -129,16 +101,19 @@ pipeline {
                                         if [ \$? -eq 0 ]; then
                                             git add "\$yaml_file"
                                             changes_made=true
-                                            echo "Updated image tag in \$yaml_file"
+                                            echo "✅ Updated image tag in \$yaml_file"
                                         fi
+                                    else
+                                        echo "⚠️  \$yaml_file not found, skipping"
                                     fi
                                 done
 
                                 if [ "\$changes_made" = true ]; then
-                                    git commit -m "chore(${ENV}): update service images to ${tag}"
-                                    git push https://\${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git master || git push https://\${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master
+                                    git commit -m "chore(\${ENV}): update service images to ${tag}" || { echo "Commit failed"; exit 1; }
+                                    git push https://\${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master || { echo "Push failed"; exit 1; }
+                                    echo "✅ Successfully updated and pushed manifests"
                                 else
-                                    echo "No changes to commit"
+                                    echo "ℹ️  No changes to commit"
                                 fi
                             """
                         }
@@ -151,24 +126,21 @@ pipeline {
     post {
         always {
             sh 'docker image prune -f || true'
-            sh 'docker system prune -f || true'
         }
         success {
             echo "✅ Pipeline completed successfully"
         }
         failure {
-            echo "❌ Pipeline failed - check missing files in service directories"
-            sh 'ls -laR src/ || true'
-            sh 'ls -laR . || true'
+            echo "❌ Pipeline failed"
+            sh 'ls -la kubernetes-files/ || true'
         }
     }
 }
 
-// Service configuration mapping
-def getServiceDir(service) {
-    def serviceMap = [
+def buildService(service) {
+    def serviceDirs = [
         'adservice': 'src/adservice',
-        'cartservice': 'cartservice',  // Special case
+        'cartservice': 'cartservice',
         'checkoutservice': 'src/checkoutservice',
         'currencyservice': 'src/currencyservice',
         'emailservice': 'src/emailservice',
@@ -179,21 +151,38 @@ def getServiceDir(service) {
         'recommendationservice': 'src/recommendationservice',
         'shippingservice': 'src/shippingservice'
     ]
-    return serviceMap[service] ?: "src/${service}"
-}
-
-def shouldBuildService(service) {
-    def serviceDir = getServiceDir(service)
-    return fileExists(serviceDir)
-}
-
-def hasValidDockerfile(service) {
-    def serviceDir = getServiceDir(service)
-    def dockerfileCandidates = ['Dockerfile', 'dockerfile', 'Dockerfile.prod']
-    for (df in dockerfileCandidates) {
-        if (fileExists("${serviceDir}/${df}")) {
-            return true
+    
+    def serviceDir = serviceDirs[service] ?: "src/${service}"
+    
+    if (!fileExists(serviceDir)) {
+        echo "⚠️  Directory ${serviceDir} not found, skipping ${service}"
+        return
+    }
+    
+    dir(serviceDir) {
+        echo "📁 Building ${service} from ${pwd()}"
+        sh 'ls -la'
+        
+        if (hasDockerfile()) {
+            def tag = params.IMAGE_TAG ?: "${BUILD_NUMBER}"
+            sh """
+                docker build -t ${service}:${tag} .
+            """
+            
+            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                sh """
+                    aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_URL}
+                    docker tag ${service}:${tag} ${env.ECR_URL}/${service}:${tag}
+                    docker push ${env.ECR_URL}/${service}:${tag}
+                """
+            }
+            echo "✅ ${service}:${tag} built and pushed successfully"
+        } else {
+            echo "⚠️  No Dockerfile found for ${service}, skipping build"
         }
     }
-    return false
+}
+
+def hasDockerfile() {
+    return fileExists('Dockerfile') || fileExists('dockerfile')
 }
