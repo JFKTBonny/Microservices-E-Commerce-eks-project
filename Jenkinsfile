@@ -37,50 +37,69 @@ pipeline {
             }
         }
 
+        stage('Validate Dockerfiles') {
+            steps {
+                script {
+                    def services = ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice']
+                    
+                    def servicesToCheck = params.SERVICES == 'all' ? services : [params.SERVICES]
+                    def validServices = []
+                    
+                    // Parallel file existence checks
+                    def checkTasks = servicesToCheck.collectEntries { service -> 
+                        ["check-${service}": {
+                            if (fileExists("${service}/Dockerfile")) {
+                                validServices << service
+                                echo "✅ ${service}: Dockerfile found"
+                            } else if (service == 'cartservice' && fileExists("cartservice/src/Dockerfile")) {
+                                validServices << service
+                                echo "✅ ${service}: src/Dockerfile found"
+                            } else {
+                                echo "❌ ${service}: No Dockerfile found"
+                            }
+                        }]
+                    }
+                    
+                    parallel checkTasks
+                    
+                    if (validServices.isEmpty()) {
+                        error "No services with Dockerfiles found to build!"
+                    }
+                    
+                    echo "🚀 Building: ${validServices.join(', ')}"
+                    env.VALID_SERVICES = validServices.join(',')
+                }
+            }
+        }
+
         stage('Build & Push Microservices') {
             steps {
                 script {
-                    def allServices = ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice']
-                    
-                    def servicesToBuild = params.SERVICES == 'all' ? allServices : [params.SERVICES]
-                    
-                    // Filter services that actually have Dockerfiles
-                    def validServices = []
-                    servicesToBuild.each { service ->
-                        if (fileExists("${service}/Dockerfile") || (service == 'cartservice' && fileExists('cartservice/src/Dockerfile'))) {
-                            validServices.add(service)
-                        }
-                    }
-                    
-                    echo "Building services: ${validServices.join(', ')}"
-                    
-                    // Login to ECR once
+                    // Single ECR login
                     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
                         sh """
                             aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
                         """
                     }
                     
-                    // Build each valid service in parallel
-                    def buildSteps = validServices.collectEntries { service -> 
-                        [ "${service}": {
+                    // Parallel builds for valid services only
+                    def services = env.VALID_SERVICES.split(',')
+                    def buildTasks = services.collectEntries { service -> 
+                        ["${service}": {
                             dir(service) {
-                                stage("${service}: Build") {
-                                    def buildContext = '.'
-                                    if (service == 'cartservice' && fileExists('src/Dockerfile')) {
-                                        buildContext = 'src'
-                                    }
-                                    
+                                stage("${service}: Build & Push") {
+                                    def buildContext = fileExists('src/Dockerfile') ? 'src' : '.'
                                     sh """
                                         docker build -t ${ECR_URL}/${service}:${TAG} ${buildContext}
                                         docker push ${ECR_URL}/${service}:${TAG}
                                     """
+                                    echo "✅ ${service} pushed to ECR: ${ECR_URL}/${service}:${TAG}"
                                 }
                             }
                         }]
                     }
                     
-                    parallel buildSteps
+                    parallel buildTasks
                 }
             }
         }
@@ -103,15 +122,16 @@ pipeline {
                                 yaml_file="${service}.yaml"
                                 if [ -f "$yaml_file" ]; then
                                     sed -i "s|image:.*|image: ${ECR_URL}/${service}:${TAG}|g" "$yaml_file"
-                                    git add "$yaml_file"
+                                    git add "$yaml_file" || true
                                 fi
                             done
                             
-                            if git diff --staged --quiet; then
-                                echo "No manifest changes to commit"
-                            else
-                                git commit -m "chore(${ENV}): update ${SERVICES} images to ${TAG} [skip ci]" || true
+                            if ! git diff --staged --quiet; then
+                                git commit -m "chore(${ENV}): update images to ${TAG} [skip ci]"
                                 git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master || true
+                                echo "✅ Manifests updated and pushed"
+                            else
+                                echo "ℹ️ No manifest changes needed"
                             fi
                         '''
                     }
@@ -125,10 +145,10 @@ pipeline {
             sh 'docker image prune -f || true'
         }
         success {
-            echo "✅ Pipeline completed successfully for ${params.SERVICES} in ${params.ENV}"
+            echo "🎉 SUCCESS: ${params.SERVICES} built and deployed to ${params.ENV}"
         }
         failure {
-            echo "❌ Pipeline failed"
+            echo "💥 FAILED: Check which services need Dockerfiles"
         }
     }
 }
