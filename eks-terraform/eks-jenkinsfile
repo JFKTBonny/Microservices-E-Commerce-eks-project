@@ -13,6 +13,7 @@ pipeline {
         stage('Checkout from Git') {
             steps {
                 echo 'Checking out Git repository...'
+                checkout scm
             }
         }
 

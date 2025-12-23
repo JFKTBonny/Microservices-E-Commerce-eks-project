@@ -8,17 +8,17 @@ pipeline {
                 'all',
                 'adservice',
                 'cartservice',
-                'paymentservice',
                 'checkoutservice',
                 'currencyservice',
                 'emailservice',
                 'frontend',
                 'loadgenerator',
+                'paymentservice',
                 'productcatalogservice',
                 'recommendationservice',
                 'shippingservice'
             ],
-            description: 'Which services to build'
+            description: 'Service(s) to process'
         )
 
         choice(
@@ -30,18 +30,12 @@ pipeline {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
-            description: 'Optional image tag (defaults to BUILD_NUMBER)'
+            description: 'Optional Docker image tag (defaults to build number)'
         )
     }
 
     environment {
-        AWS_REGION   = "us-east-1"
-        ECR_ACCOUNT = "163447728448"
-        ECR_URL     = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-        GIT_USER_NAME = "JFKTBonny"
-        GIT_EMAIL     = "jkamkotoyip@yahoo.com"
-        GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
+        DOCKERHUB_ORG = "jfktbonny"   // 👈 your Docker Hub username/org
     }
 
     stages {
@@ -52,99 +46,24 @@ pipeline {
             }
         }
 
-        stage('Build & Push Services') {
+        stage('Test → Build → Push') {
             steps {
                 script {
+                    def tag = params.IMAGE_TAG ?: env.BUILD_NUMBER
 
-                    def TAG = params.IMAGE_TAG?.trim()
-                    if (!TAG) {
-                        TAG = env.BUILD_NUMBER
-                    }
+                    def services = params.SERVICES == 'all'
+                        ? serviceConfig.keySet()
+                        : [params.SERVICES]
 
-                    /*
-                      service : [
-                        dockerfile path,
-                        build context,
-                        ecr repo name
-                      ]
-                    */
-                    def services = [
-                        adservice: [
-                            dockerfile: 'src/adservice/Dockerfile',
-                            context   : 'src/adservice',
-                            repo      : 'adservice'
-                        ],
-                        cartservice: [
-                            dockerfile: 'cartservice/src/Dockerfile',
-                            context   : 'cartservice/src',
-                            repo      : 'cartservice'
-                        ],
-                        paymentservice: [
-                            dockerfile: 'src/paymentservice/Dockerfile',
-                            context   : 'src/paymentservice',
-                            repo      : 'paymentservice'
-                        ],
-                        checkoutservice: [
-                            dockerfile: 'src/checkoutservice/Dockerfile',
-                            context   : 'src/checkoutservice',
-                            repo      : 'checkoutservice'
-                        ],
-                        currencyservice: [
-                            dockerfile: 'src/currencyservice/Dockerfile',
-                            context   : 'src/currencyservice',
-                            repo      : 'currencyservice'
-                        ],
-                        emailservice: [
-                            dockerfile: 'src/emailservice/Dockerfile',
-                            context   : 'src/emailservice',
-                            repo      : 'emailservice'
-                        ],
-                        frontend: [
-                            dockerfile: 'src/frontend/Dockerfile',
-                            context   : 'src/frontend',
-                            repo      : 'frontend'
-                        ],
-                        loadgenerator: [
-                            dockerfile: 'src/loadgenerator/Dockerfile',
-                            context   : 'src/loadgenerator',
-                            repo      : 'loadgenerator'
-                        ],
-                        productcatalogservice: [
-                            dockerfile: 'src/productcatalogservice/Dockerfile',
-                            context   : 'src/productcatalogservice',
-                            repo      : 'productcatalogservice'
-                        ],
-                        recommendationservice: [
-                            dockerfile: 'src/recommendationservice/Dockerfile',
-                            context   : 'src/recommendationservice',
-                            repo      : 'recommendationservice'
-                        ],
-                        shippingservice: [
-                            dockerfile: 'src/shippingservice/Dockerfile',
-                            context   : 'src/shippingservice',
-                            repo      : 'shippingservice'
-                        ]
-                    ]
+                    def parallelSteps = [:]
 
-                    def selected = (params.SERVICES == 'all') ?
-                        services.keySet() :
-                        [params.SERVICES]
-
-                    def jobs = [:]
-
-                    selected.each { svc ->
-                        jobs[svc] = {
-                            buildAndPush(
-                                svc,
-                                services[svc].dockerfile,
-                                services[svc].context,
-                                services[svc].repo,
-                                TAG
-                            )
+                    services.each { svc ->
+                        parallelSteps[svc] = {
+                            processService(svc, tag)
                         }
                     }
 
-                    parallel jobs
+                    parallel parallelSteps
                 }
             }
         }
@@ -154,44 +73,123 @@ pipeline {
         always {
             sh 'docker image prune -f || true'
         }
+        success {
+            echo "✅ Pipeline completed successfully"
+        }
+        failure {
+            echo "❌ Pipeline failed"
+        }
     }
 }
 
-/* =============================
-   Helper Function
-   ============================= */
+/* ================================
+   SERVICE CONFIGURATION
+================================ */
 
-def buildAndPush(service, dockerfile, context, repo, tag) {
+def serviceConfig = [
+    adservice: [
+        dir: 'src/adservice',
+        test: { env -> "./gradlew test" }
+    ],
 
-    if (!fileExists(dockerfile)) {
-        echo "⚠️ Dockerfile not found for ${service}, skipping"
+    cartservice: [
+        dir: 'src/cartservice',
+        test: { env -> "dotnet test" }
+    ],
+
+    checkoutservice: [
+        dir: 'src/checkoutservice',
+        test: { env -> "go test ./..." }
+    ],
+
+    frontend: [
+        dir: 'src/frontend',
+        test: { env -> "go test ./..." }
+    ],
+
+    productcatalogservice: [
+        dir: 'src/productcatalogservice',
+        test: { env -> "go test ./..." }
+    ],
+
+    shippingservice: [
+        dir: 'src/shippingservice',
+        test: { env -> "go test ./..." }
+    ],
+
+    currencyservice: [
+        dir: 'src/currencyservice',
+        test: { env -> "npm install && npm test" }
+    ],
+
+    paymentservice: [
+        dir: 'src/paymentservice',
+        test: { env -> "npm install && npm test" }
+    ],
+
+    emailservice: [
+        dir: 'src/emailservice',
+        test: { env -> "pip install -r requirements.txt && pytest" }
+    ],
+
+    recommendationservice: [
+        dir: 'src/recommendationservice',
+        test: { env -> "pip install -r requirements.txt && pytest" }
+    ],
+
+    loadgenerator: [
+        dir: 'src/loadgenerator',
+        test: { env -> "echo 'Skipping tests for loadgenerator'" }
+    ]
+]
+
+/* ================================
+   SERVICE EXECUTION
+================================ */
+
+def processService(service, tag) {
+
+    def cfg = serviceConfig[service]
+
+    if (!cfg) {
+        echo "⚠️ No config for ${service}, skipping"
         return
     }
 
-    echo "🚀 Building ${service}:${tag}"
+    dir(cfg.dir) {
 
-    sh """
-        docker build \
-          -f ${dockerfile} \
-          -t ${repo}:${tag} \
-          --build-arg ENV=${params.ENV} \
-          --label service=${service} \
-          --label build=${tag} \
-          ${context}
-    """
+        echo "🚀 Processing ${service} (${params.ENV})"
 
-    withCredentials([
-        [$class: 'AmazonWebServicesCredentialsBinding',
-         credentialsId: 'aws-credentials']
-    ]) {
+        /* ---------- TEST ---------- */
+        if (params.ENV != 'prod') {
+            echo "🧪 Running tests for ${service}"
+            sh cfg.test(params.ENV)
+        } else {
+            echo "🧪 PROD → skipping heavy tests"
+        }
+
+        /* ---------- BUILD ---------- */
+        if (!fileExists('Dockerfile')) {
+            error "❌ Dockerfile not found for ${service}"
+        }
+
         sh """
-            aws ecr get-login-password --region ${env.AWS_REGION} \
-            | docker login --username AWS --password-stdin ${env.ECR_URL}
-
-            docker tag ${repo}:${tag} ${env.ECR_URL}/${repo}:${tag}
-            docker push ${env.ECR_URL}/${repo}:${tag}
+            docker build -t ${service}:${tag} .
         """
-    }
 
-    echo "✅ ${service} pushed to ECR"
+        /* ---------- PUSH ---------- */
+        withCredentials([usernamePassword(
+            credentialsId: 'dockerhub-creds',
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+        )]) {
+            sh """
+                echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                docker tag ${service}:${tag} ${DOCKERHUB_ORG}/${service}:${tag}
+                docker push ${DOCKERHUB_ORG}/${service}:${tag}
+            """
+        }
+
+        echo "✅ ${service}:${tag} pushed to Docker Hub"
+    }
 }
