@@ -54,54 +54,53 @@ pipeline {
         }
 
         stage('Build & Push Microservices') {
-            matrix {
-                axes {
-                    axis {
-                        name 'SERVICE'
-                        values 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice',
-                               'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice',
-                               'recommendationservice', 'shippingservice'
-                    }
-                }
-                options {
-                    failFast false
-                    maxParallel params.MAX_PARALLEL.toInteger()
-                }
-                
-                when {
-                    expression {
-                        params.SERVICES == 'all' || params.SERVICES == env.SERVICE
-                    }
-                }
-
-                stages {
-                    stage('Build Image') {
-                        steps {
-                            script {
-                                def dockerfilePath = getDockerfilePath(env.SERVICE)
-                                if (checkDockerfileExists(env.SERVICE)) {
-                                    sh """
-                                        TAG=${IMAGE_TAG:-$BUILD_NUMBER}
-                                        echo "Building ${SERVICE} with tag ${TAG}"
-                                        docker build -f ${dockerfilePath} -t ${SERVICE}:${TAG} .
-                                    """
-                                }
+            parallel {
+                stage('Build & Push Services') {
+                    matrix {
+                        axes {
+                            axis {
+                                name 'SERVICE'
+                                values 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice',
+                                       'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice',
+                                       'recommendationservice', 'shippingservice'
                             }
                         }
-                    }
+                        when {
+                            expression {
+                                params.SERVICES == 'all' || params.SERVICES == env.SERVICE
+                            }
+                        }
 
-                    stage('Push to ECR') {
-                        steps {
-                            script {
-                                if (checkDockerfileExists(env.SERVICE)) {
-                                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
-                                        sh """
-                                            TAG=${IMAGE_TAG:-$BUILD_NUMBER}
-                                            echo "Logging in to ECR and pushing ${SERVICE}:${TAG}"
-                                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
-                                            docker tag ${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
-                                            docker push ${ECR_URL}/${SERVICE}:${TAG}
-                                        """
+                        stages {
+                            stage('Build Image') {
+                                steps {
+                                    script {
+                                        def dockerfilePath = getDockerfilePath(env.SERVICE)
+                                        if (checkDockerfileExists(env.SERVICE)) {
+                                            sh """
+                                                TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                                                echo "Building ${SERVICE} with tag ${TAG}"
+                                                docker build -f ${dockerfilePath} -t ${SERVICE}:${TAG} .
+                                            """
+                                        }
+                                    }
+                                }
+                            }
+
+                            stage('Push to ECR') {
+                                steps {
+                                    script {
+                                        if (checkDockerfileExists(env.SERVICE)) {
+                                            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                                                sh """
+                                                    TAG=${IMAGE_TAG:-$BUILD_NUMBER}
+                                                    echo "Logging in to ECR and pushing ${SERVICE}:${TAG}"
+                                                    aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}
+                                                    docker tag ${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
+                                                    docker push ${ECR_URL}/${SERVICE}:${TAG}
+                                                """
+                                            }
+                                        }
                                     }
                                 }
                             }
