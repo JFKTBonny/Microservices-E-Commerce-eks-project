@@ -38,7 +38,7 @@ pipeline {
     }
 
     environment {
-        DOCKERHUB_ORG = "jfktbonny"
+        DOCKERHUB_ORG = "santonix"
     }
 
     stages {
@@ -217,7 +217,7 @@ def processService(service, tag, serviceConfig) {
         // Push phase
         stage("${service} - Push") {
             withCredentials([usernamePassword(
-                credentialsId: 'dockerhub-creds',
+                credentialsId: 'dockerhub-credentials',
                 usernameVariable: 'DOCKER_USER',
                 passwordVariable: 'DOCKER_PASS'
             )]) {
