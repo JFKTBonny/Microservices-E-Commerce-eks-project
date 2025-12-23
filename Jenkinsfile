@@ -4,7 +4,7 @@ pipeline {
     parameters {
         choice(
             name: 'SERVICES',
-            choices: ['all', 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'],
+            choices: ['all', 'adservice', 'cartservice/src', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'],
             description: 'Which services to build'
         )
         choice(
@@ -42,7 +42,7 @@ pipeline {
                 axes {
                     axis {
                         name 'SERVICE'
-                        values 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
+                        values 'adservice', 'cartservice/src', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
                     }
                 }
                 
@@ -57,14 +57,13 @@ pipeline {
                     stage('Build Image') {
                         steps {
                             script {
-                                def dockerfilePath = SERVICE == 'cartservice' ? 'src/cartservice/src/Dockerfile' : "src/${SERVICE}/Dockerfile"
-                                if (fileExists(dockerfilePath)) {
+                               
+                                
                                     sh """
                                         TAG=${IMAGE_TAG:-$BUILD_NUMBER}
                                         docker build -f ${dockerfilePath} -t ${SERVICE}:${TAG} .
                                     """
-                                } else {
-                                    echo "⚠️ Dockerfile not found for ${SERVICE}, skipping build."
+                                
                                 }
                             }
                         }
@@ -73,8 +72,7 @@ pipeline {
                     stage('Push to ECR') {
                         steps {
                             script {
-                                def dockerfilePath = SERVICE == 'cartservice' ? 'cartservice/src/Dockerfile' : "src/${SERVICE}/Dockerfile"
-                                if (fileExists(dockerfilePath)) {
+                                
                                     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
                                         sh """
                                             TAG=${IMAGE_TAG:-$BUILD_NUMBER}
