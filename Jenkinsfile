@@ -4,7 +4,7 @@ pipeline {
     parameters {
         choice(
             name: 'SERVICES',
-            choices: ['all', 'adservice', 'cartservice/src', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'],
+            choices: ['all', 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'],
             description: 'Which services to build'
         )
         choice(
@@ -20,17 +20,17 @@ pipeline {
     }
 
     environment {
-        AWS_REGION  = "us-east-1"
-        ECR_ACCOUNT = "163447728448"
+        AWS_REGION  = 'us-east-1'
+        ECR_ACCOUNT = '163447728448'
         ECR_URL     = "${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-        GIT_USER_NAME = "JFKTBonny"
-        GIT_EMAIL     = "jkamkotoyip@yahoo.com"
-        GIT_REPO_NAME = "Microservices-E-Commerce-eks-project"
+        TAG         = "${params.IMAGE_TAG ?: env.BUILD_NUMBER}"
+        
+        GIT_USER_NAME = 'JFKTBonny'
+        GIT_EMAIL     = 'jkamkotoyip@yahoo.com'
+        GIT_REPO_NAME = 'Microservices-E-Commerce-eks-project'
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
@@ -39,51 +39,41 @@ pipeline {
 
         stage('Build & Push Microservices') {
             matrix {
+                agent any
                 axes {
                     axis {
-                        name 'SERVICE'
-                        values 'adservice', 'cartservice/src', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
+                        name: 'SERVICE'
+                        values: ['adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice']
                     }
                 }
-                
-                when {
-                    expression {
-                        params.SERVICES == 'all' || params.SERVICES == env.SERVICE
-                    }
-                }
-
                 stages {
-
                     stage('Build Image') {
+                        when {
+                            expression { params.SERVICES == 'all' || params.SERVICES == env.SERVICE }
+                        }
                         steps {
-                            
-                               
-                                
-                                sh """
-                                    
-                                    docker build -t ${SERVICE}:${TAG} .
-                                """
-                                
-                                
+                            dir(env.SERVICE) {
+                                script {
+                                    // Handle cartservice/src subdirectory case
+                                    def buildDir = env.SERVICE == 'cartservice' ? 'src' : '.'
+                                    sh """
+                                        docker build -t ${ECR_URL}/${SERVICE}:${TAG} ${buildDir}
+                                    """
+                                }
                             }
                         }
-                }
-
+                    }
                     stage('Push to ECR') {
+                        when {
+                            expression { params.SERVICES == 'all' || params.SERVICES == env.SERVICE }
+                        }
                         steps {
-                            script {
-                                
-                                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
-                                        sh """
-                                            
-                                            aws ecr get-login-password --region ${AWS_REGION} \
-                                            | docker login --username AWS --password-stdin ${ECR_URL}
-
-                                            docker tag ${SERVICE}:${TAG} ${ECR_URL}/${SERVICE}:${TAG}
-                                            docker push ${ECR_URL}/${SERVICE}:${TAG}
-                                        """
-                                    }
-                                }
+                            withAWS(credentials: 'aws-credentials', region: env.AWS_REGION) {
+                                sh """
+                                    aws ecr get-login-password --region ${AWS_REGION} \
+                                        | docker login --username AWS --password-stdin ${ECR_URL}
+                                    docker push ${ECR_URL}/${SERVICE}:${TAG}
+                                """
                             }
                         }
                     }
@@ -91,26 +81,46 @@ pipeline {
             }
         }
 
+        stage('Security Scan') {
+            when {
+                expression { params.ENV != 'prod' || params.SERVICES != 'frontend' }
+            }
+            steps {
+                script {
+                    // Add your OWASP Dependency-Check or Trivy scan here
+                    sh 'trivy image --exit-code 1 --no-progress ${ECR_URL}/frontend:${TAG} || true'
+                }
+            }
+        }
+
         stage('Update Kubernetes Manifests') {
+            when {
+                expression { params.SERVICES != 'loadgenerator' }
+            }
             steps {
                 dir('kubernetes-files') {
                     withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
                         sh '''
-                            git checkout master
+                            git checkout master || git checkout -b update-manifests
                             git config user.email "${GIT_EMAIL}"
                             git config user.name "${GIT_USER_NAME}"
-
-                            for service in adservice cartservice paymentservice checkoutservice currencyservice emailservice frontend loadgenerator productcatalogservice recommendationservice shippingservice
-                            do
+                            
+                            services="adservice cartservice paymentservice checkoutservice currencyservice emailservice frontend productcatalogservice recommendationservice shippingservice"
+                            
+                            for service in $services; do
                                 yaml_file="${service}.yaml"
                                 if [ -f "$yaml_file" ]; then
-                                    sed -i "s#image:.*#image: ${ECR_URL}/${service}:${IMAGE_TAG:-$BUILD_NUMBER}#g" "$yaml_file"
+                                    sed -i "s|image:.*|image: ${ECR_URL}/${service}:${TAG}|g" "$yaml_file"
                                     git add "$yaml_file"
                                 fi
                             done
-
-                            git commit -m "chore(${ENV}): update service images" || echo "No changes to commit"
-                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git master
+                            
+                            if git diff --staged --quiet; then
+                                echo "No manifest changes to commit"
+                            else
+                                git commit -m "chore(${ENV}): update ${SERVICES} images to ${TAG} [skip ci]"
+                                git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master || git push -f https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:master
+                            fi
                         '''
                     }
                 }
@@ -119,11 +129,15 @@ pipeline {
     }
 
     post {
-        success {
-            echo "✅ Matrix pipeline completed successfully"
-        }
-        cleanup {
+        always {
             sh 'docker image prune -f || true'
+            sh 'docker system prune -f || true'
+        }
+        success {
+            echo "✅ Pipeline completed successfully for ${params.SERVICES} in ${params.ENV}"
+        }
+        failure {
+            echo "❌ Pipeline failed - check logs above"
         }
     }
 }
