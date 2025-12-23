@@ -45,8 +45,7 @@ pipeline {
                         values 'adservice', 'cartservice', 'paymentservice', 'checkoutservice', 'currencyservice', 'emailservice', 'frontend', 'loadgenerator', 'productcatalogservice', 'recommendationservice', 'shippingservice'
                     }
                 }
-                failFast false
-                maxParallel 2  // limit parallel builds to reduce Docker timeout
+                
                 when {
                     expression {
                         params.SERVICES == 'all' || params.SERVICES == env.SERVICE
