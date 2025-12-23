@@ -63,7 +63,7 @@ pipeline {
                         
                         // .NET (special case)
                         cartservice: [
-                            dir: 'cartservice',
+                            dir: 'src/cartservice/src',
                             test: 'dotnet test',
                             dockerfile: 'Dockerfile'
                         ],
